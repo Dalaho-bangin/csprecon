@@ -31,7 +31,7 @@ const (
 
 // CheckCSP returns the list of domains parsed from a URL found in CSP.
 func CheckCSP(url, ua string, rCSP *regexp.Regexp, client *http.Client) ([]string, error) {
-	result := []string{}
+	result := []string{} //nolint:prealloc
 
 	gologger.Debug().Msgf("Checking CSP for %s", url)
 
