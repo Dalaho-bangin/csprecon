@@ -9,7 +9,6 @@ package csprecon
 import (
 	"crypto/tls"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -80,7 +79,11 @@ func ParseBodyCSP(body io.Reader, rCSP *regexp.Regexp) []string {
 
 	doc, err := goquery.NewDocumentFromReader(body)
 	if err != nil {
-		log.Fatal(err)
+		// HARD FIX
+		// https://github.com/edoardottt/csprecon/issues/482
+		// with a simple print instead of fatal/panic
+		// we get a SIGSEGV in doc.Find
+		return []string{}
 	}
 
 	doc.Find("meta[http-equiv='Content-Security-Policy']").Each(func(i int, s *goquery.Selection) {
