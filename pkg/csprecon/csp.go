@@ -26,11 +26,15 @@ const (
 	KeepAlive           = 30
 	DomainRegex         = `(?i)(?:[_a-z0-9\*](?:[_a-z0-9-\*]{0,61}[a-z0-9])?\.)+(?:[a-z](?:[a-z0-9-]{0,61}[a-z0-9]))+`
 	MinURLLength        = 4
+	MaxKBBodyReader     = 500 * 1024 // Limit reading to the first 500KB of the HTML body
+	MaxIdleConns        = 100
+	MaxIdleConnsPerHost = 10
+	IdleConnTimeout     = 90
 )
 
 // CheckCSP returns the list of domains parsed from a URL found in CSP.
 func CheckCSP(url, ua string, rCSP *regexp.Regexp, client *http.Client) ([]string, error) {
-	result := []string{} //nolint:prealloc
+	result := []string{}
 
 	gologger.Debug().Msgf("Checking CSP for %s", url)
 
@@ -48,11 +52,18 @@ func CheckCSP(url, ua string, rCSP *regexp.Regexp, client *http.Client) ([]strin
 
 	defer resp.Body.Close()
 
-	headerCSP := ParseCSP(resp.Header.Get("Content-Security-Policy"), rCSP)
-	result = append(result, headerCSP...)
+	cspHeaders := []string{
+		"Content-Security-Policy",
+		"Content-Security-Policy-Report-Only",
+		"X-Content-Security-Policy",
+		"X-WebKit-CSP",
+	}
 
-	headerCSP = ParseCSP(resp.Header.Get("Content-Security-Policy-Report-Only"), rCSP)
-	result = append(result, headerCSP...)
+	for _, h := range cspHeaders {
+		if val := resp.Header.Get(h); val != "" {
+			result = append(result, ParseCSP(val, rCSP)...)
+		}
+	}
 
 	bodyCSP := ParseBodyCSP(resp.Body, rCSP)
 	result = append(result, bodyCSP...)
@@ -62,13 +73,7 @@ func CheckCSP(url, ua string, rCSP *regexp.Regexp, client *http.Client) ([]strin
 
 // ParseCSP returns the list of domains parsed from a raw CSP (string).
 func ParseCSP(input string, r *regexp.Regexp) []string {
-	result := []string{}
-
-	matches := r.FindAllStringSubmatch(input, -1)
-	for _, match := range matches {
-		result = append(result, match...)
-	}
-
+	result := r.FindAllString(input, -1)
 	return golazy.RemoveDuplicateValues(result)
 }
 
@@ -77,7 +82,9 @@ func ParseCSP(input string, r *regexp.Regexp) []string {
 func ParseBodyCSP(body io.Reader, rCSP *regexp.Regexp) []string {
 	result := []string{}
 
-	doc, err := goquery.NewDocumentFromReader(body)
+	limitedReader := io.LimitReader(body, MaxKBBodyReader)
+
+	doc, err := goquery.NewDocumentFromReader(limitedReader)
 	if err != nil {
 		// HARD FIX
 		// https://github.com/edoardottt/csprecon/issues/482
@@ -86,10 +93,11 @@ func ParseBodyCSP(body io.Reader, rCSP *regexp.Regexp) []string {
 		return []string{}
 	}
 
-	doc.Find("meta[http-equiv='Content-Security-Policy']").Each(func(i int, s *goquery.Selection) {
+	// Add the 'i' modifier to make http-equiv case-insensitive
+	doc.Find("meta[http-equiv='Content-Security-Policy' i]").Each(func(i int, s *goquery.Selection) {
 		contentCSP := s.AttrOr("content", "")
 		if contentCSP != "" {
-			result = ParseCSP(contentCSP, rCSP)
+			result = append(result, ParseCSP(contentCSP, rCSP)...)
 		}
 	})
 
@@ -100,11 +108,14 @@ func customClient(options *input.Options) (*http.Client, error) {
 	transport := http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		Proxy:           http.ProxyFromEnvironment,
-		Dial: (&net.Dialer{
+		DialContext: (&net.Dialer{
 			Timeout:   time.Duration(options.Timeout) * time.Second,
 			KeepAlive: KeepAlive * time.Second,
-		}).Dial,
+		}).DialContext,
 		TLSHandshakeTimeout: TLSHandshakeTimeout * time.Second,
+		MaxIdleConns:        MaxIdleConns,
+		MaxIdleConnsPerHost: MaxIdleConnsPerHost,
+		IdleConnTimeout:     IdleConnTimeout * time.Second,
 	}
 
 	if options.Proxy != "" {
